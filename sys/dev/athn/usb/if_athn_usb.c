@@ -133,7 +133,7 @@ void		athn_usb_write(struct athn_softc *, uint32_t, uint32_t);
 void		athn_usb_write_barrier(struct athn_softc *);
 int		athn_usb_media_change(struct ifnet *);
 void		athn_usb_next_scan(void *);
-int		athn_usb_newstate(struct ieee80211com *, enum ieee80211_state,
+static int	athn_usb_newstate(struct ieee80211vap *, enum ieee80211_state,
 		    int);
 void		athn_usb_newstate_cb(struct athn_usb_softc *, void *);
 void		athn_usb_newassoc(struct ieee80211_node *, int);
@@ -495,17 +495,24 @@ athn_usb_detach(device_t self)
 	struct athn_usb_softc *usc = device_get_softc(self);
 	struct athn_softc *sc = &usc->sc_sc;
 
+//	ATHN_LOCK(sc);
+//	sc->athn_attached = 0;
+//	ATHN_UNLOCK(sc);
+
 	usbd_transfer_unsetup(usc->usc_xfer, ATHN_N_TRANSFERS);
-	mtx_destroy(&sc->sc_mtx);
-	DEBUG_PRINTF("Destroy\n");
-	return 0;
-#if 0
-	struct athn_usb_softc *usc = (struct athn_usb_softc *)self;
-	struct athn_softc *sc = &usc->sc_sc;
+//	mtx_destroy(&sc->sc_mtx);
 
 	if (usc->sc_athn_attached)
 		athn_detach(sc);
 
+
+	////////////////////////////////////////////////////////////////////
+	/// Only putting this here while athn_detach remains implemented ///
+	///////////////////////////////////////////////////////////////////
+//	ieee80211_ifdetach(ic);
+
+	return (0);
+#if 0
 	/* Wait for all async commands to complete. */
 	athn_usb_wait_async(usc);
 
@@ -550,7 +557,6 @@ athn_usb_vap_create(struct ieee80211com *ic, const char name[IFNAMSIZ], int unit
 	if (opmode == IEEE80211_M_MONITOR) {
 		DEBUG_PRINTF("monitor mode\n");
 	}
-
 	avp = malloc(sizeof(struct athn_vap), M_80211_VAP, M_WAITOK | M_ZERO);
 	vap = &avp->vap;
 
@@ -562,7 +568,10 @@ athn_usb_vap_create(struct ieee80211com *ic, const char name[IFNAMSIZ], int unit
 
 	/* override state transition machine */
 	avp->newstate = vap->iv_newstate;
-	vap->iv_newstate = athn_newstate;
+	vap->iv_newstate = athn_usb_newstate;
+
+	printf("Address 1 is %p\n", avp->newstate);
+	printf("Address 2 is %p\n", vap->iv_newstate);
 
 //	vap->vp_set_key = athn_usb_set_key;
 //	vap->vp_delete_key = athn_usb_delete_key;
@@ -665,7 +674,6 @@ athn_usb_attachhook(device_t self)
 	ic->ic_ampdu_tx_start = athn_usb_ampdu_tx_start;	// For VAP
 	ic->ic_ampdu_tx_stop = athn_usb_ampdu_tx_stop;		// For VAP
 #endif
-//	ic->ic_newstate = athn_usb_newstate;
 #if 0
 	ic->ic_media.ifm_change = athn_usb_media_change;
 	timeout_set(&sc->scan_to, athn_usb_next_scan, usc);
@@ -1541,6 +1549,7 @@ athn_usb_wmi_xcmd(struct athn_usb_softc *usc, uint16_t cmd_id, void *ibuf,
 //	error = tsleep(&usc->wait_cmd_id, 0, "athnwmi", ATHN_USB_CMD_TIMEOUT);
 	ATHN_LOCK(sc);
 	error = msleep(&usc->wait_cmd_id, &sc->sc_mtx, 0, "athnwmi", ATHN_USB_CMD_TIMEOUT);
+	printf("athnwmi wakeup\n");
 	ATHN_UNLOCK(sc);
 //	error = tsleep_nsec(&usc->wait_cmd_id, 0, "athnwmi",
 //	    MSEC_TO_NSEC(ATHN_USB_CMD_TIMEOUT));
@@ -1685,71 +1694,56 @@ athn_usb_next_scan(void *arg)
 #endif
 }
 
-int
-athn_usb_newstate(struct ieee80211com *ic, enum ieee80211_state nstate,
+//void
+//athn_usb_newstate_cb(struct athn_usb_softc *usc, void *arg)
+static int
+athn_usb_newstate(struct ieee80211vap *vap, enum ieee80211_state nstate,
     int arg)
 {
-	printf("%s unimplemented.\n", __func__);
-	return 0;
-#if 0
+//	struct athn_usb_cmd_newstate *cmd = arg;
+	struct ieee80211com *ic = vap->iv_ic;
 	struct athn_usb_softc *usc = ic->ic_softc;
-	struct athn_usb_cmd_newstate cmd;
-
-	/* Do it in a process context. */
-	cmd.state = nstate;
-	cmd.arg = arg;
-	athn_usb_do_async(usc, athn_usb_newstate_cb, &cmd, sizeof(cmd));
-	return (0);
-#endif
-}
-
-void
-athn_usb_newstate_cb(struct athn_usb_softc *usc, void *arg)
-{
-	printf("%s unimplemented.\n", __func__);
-#if 0
-	struct athn_usb_cmd_newstate *cmd = arg;
 	struct athn_softc *sc = &usc->sc_sc;
-	struct ieee80211com *ic = &sc->sc_ic;
+	//struct athn_softc *sc = &usc->sc_sc;
 	enum ieee80211_state ostate;
 	uint32_t reg, imask;
-	int s, error;
+	int error;
 
-	timeout_del(&sc->calib_to);
+	callout_stop(&sc->calib_to);
 
-	s = splnet();
-	ostate = ic->ic_state;
+//	s = splnet();
+	ostate = vap->iv_state;
 
 	if (ostate == IEEE80211_S_RUN && ic->ic_opmode == IEEE80211_M_STA) {
-		athn_usb_remove_node(usc, ic->ic_bss);
+		athn_usb_remove_node(usc, vap->iv_bss);
 		reg = AR_READ(sc, AR_RX_FILTER);
 		reg = (reg & ~AR_RX_FILTER_MYBEACON) |
 		    AR_RX_FILTER_BEACON;
 		AR_WRITE(sc, AR_RX_FILTER, reg);
 		AR_WRITE_BARRIER(sc);
 	}
-	switch (cmd->state) {
+	switch (nstate) {
 	case IEEE80211_S_INIT:
 		athn_set_led(sc, 0);
 		break;
 	case IEEE80211_S_SCAN:
 		/* Make the LED blink while scanning. */
 		athn_set_led(sc, !sc->led_state);
-		error = athn_usb_switch_chan(sc, ic->ic_bss->ni_chan, NULL);
+		error = athn_usb_switch_chan(sc, ic->ic_bsschan, NULL);
 		if (error)
-			printf("%s: could not switch to channel %d\n",
-			    usc->usb_dev.dv_xname,
-			    ieee80211_chan2ieee(ic, ic->ic_bss->ni_chan));
-		if (!usbd_is_dying(usc->sc_udev))
-			timeout_add_msec(&sc->scan_to, 200);
+			device_printf(usc->sc_sc.sc_dev,
+			    "could not switch to channel %d\n",
+			    ieee80211_chan2ieee(ic, ic->ic_bsschan));
+//		if (!usbd_is_dying(usc->sc_udev))
+//			timeout_add_msec(&sc->scan_to, 200);
 		break;
 	case IEEE80211_S_AUTH:
 		athn_set_led(sc, 0);
-		error = athn_usb_switch_chan(sc, ic->ic_bss->ni_chan, NULL);
+		error = athn_usb_switch_chan(sc, ic->ic_bsschan, NULL);
 		if (error)
-			printf("%s: could not switch to channel %d\n",
-			    usc->usb_dev.dv_xname,
-			    ieee80211_chan2ieee(ic, ic->ic_bss->ni_chan));
+			device_printf(usc->sc_sc.sc_dev,
+				"could not switch to channel %d\n",
+				ieee80211_chan2ieee(ic, ic->ic_bsschan));
 		break;
 	case IEEE80211_S_ASSOC:
 		break;
@@ -1761,16 +1755,16 @@ athn_usb_newstate_cb(struct athn_usb_softc *usc, void *arg)
 
 		if (ic->ic_opmode == IEEE80211_M_STA) {
 			/* Create node entry for our BSS */
-			error = athn_usb_create_node(usc, ic->ic_bss);
+			error = athn_usb_create_node(usc, vap->iv_bss);
 			if (error)
-				printf("%s: could not update firmware station "
-				    "table\n", usc->usb_dev.dv_xname);
+				device_printf(usc->sc_sc.sc_dev,
+				"could not update firmware station table\n");
 		}
-		athn_set_bss(sc, ic->ic_bss);
+		athn_set_bss(sc, vap->iv_bss);
 		athn_usb_wmi_cmd(usc, AR_WMI_CMD_DISABLE_INTR);
 #ifndef IEEE80211_STA_ONLY
 		if (ic->ic_opmode == IEEE80211_M_HOSTAP) {
-			athn_usb_switch_chan(sc, ic->ic_bss->ni_chan, NULL);
+			athn_usb_switch_chan(sc, ic->ic_bsschan, NULL);
 			athn_set_hostap_timers(sc);
 			/* Enable software beacon alert interrupts. */
 			imask = htobe32(AR_IMR_SWBA);
@@ -1791,10 +1785,10 @@ athn_usb_newstate_cb(struct athn_usb_softc *usc, void *arg)
 		athn_usb_wmi_xcmd(usc, AR_WMI_CMD_ENABLE_INTR,
 		    &imask, sizeof(imask), NULL);
 		break;
+	default:
+		printf("Unhandled state change\n");
 	}
-	(void)sc->sc_newstate(ic, cmd->state, cmd->arg);
-	splx(s);
-#endif
+	return (vap->iv_newstate(vap, nstate, arg));
 }
 
 void
@@ -3344,21 +3338,22 @@ athn_usb_ioctl(struct ieee80211com *ic, u_long cmd, void *data)
 int
 athn_usb_init(struct athn_softc *sc)
 {
-	DEBUG_PRINTF("%s unimplemented.\n", __func__);
 //	struct athn_softc *sc = ifp->if_softc;
 //	struct athn_usb_softc *usc = device_get_softc(self);
 	struct athn_usb_softc *usc = (struct athn_usb_softc *)sc;
-	struct athn_ops *ops = &sc->ops;
+//	struct athn_ops *ops = &sc->ops;
 	struct ieee80211com *ic = &sc->sc_ic;
-	struct ieee80211_channel *c, *extc;
+//	struct ieee80211_channel *c, *extc;
+	struct ieee80211_channel *c;
 //	struct athn_usb_rx_data *data;
-	struct ar_htc_target_vif hvif;
-	struct ar_htc_target_sta sta;
-	struct ar_htc_cap_target hic;
-	uint16_t mode;
-	//int i, error;
+//	struct ar_htc_target_vif hvif;
+//	struct ar_htc_target_sta sta;
+//	struct ar_htc_cap_target hic;
+//	uint16_t mode;
 	int error;
 
+	printf("Failure condition...\n");
+	return 22222;
 	/* Init host async commands ring. */
 	usc->cmdq.cur = usc->cmdq.next = usc->cmdq.queued = 0;
 
@@ -3385,8 +3380,14 @@ athn_usb_init(struct athn_softc *sc)
 
 	//c = ic->ic_bss->ni_chan = ic->ic_bsschan;
 	c = ic->ic_bsschan;
-	extc = NULL;
+
+	if (c == IEEE80211_CHAN_ANYC) {
+		printf("Why does FreeBSD break here?\n");
+		goto fail;
+	}
+//	extc = NULL; // Re-enable this later
 	DEBUG_PRINTF("temporarily cutting out iv_bss->ni_chan, DEFINITELY do not ignore this\n");
+#if 0
 
 	/* In case a new MAC address has been configured. */
 //	IEEE80211_ADDR_COPY(ic->ic_myaddr, LLADDR(ifp->if_sadl));
@@ -3479,7 +3480,7 @@ athn_usb_init(struct athn_softc *sc)
 	if (error != 0)
 		goto fail;
 
-	return 0; // Get out of jail early card
+	goto fail; // Get out of jail early card
 #if 0
 	/* Queue Rx xfers. */
 	for (i = 0; i < ATHN_USB_RX_LIST_COUNT; i++) {
@@ -3509,6 +3510,7 @@ athn_usb_init(struct athn_softc *sc)
 		ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
 #endif
 	athn_usb_wait_async(usc);
+#endif
 	return (0);
  fail:
 	DEBUG_PRINTF("athn_usb_stop not working cuz you know...\n");

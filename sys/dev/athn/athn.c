@@ -68,6 +68,9 @@ __FBSDID("$FreeBSD$");
 
 int debug_knob = 0;
 
+     #include <sys/param.h>
+     #include <sys/stack.h>
+
 #define DEBUG_PRINTF(format, ...) if (debug_knob == 1) { printf("DEBUG: " format, ##__VA_ARGS__);}
 /*
 void DEBUG_PRINTF(const char *format, ...) {
@@ -176,7 +179,7 @@ void		athn_start(struct ifnet *);
 void		athn_watchdog(struct ifnet *);
 void		athn_set_multi(struct athn_softc *);
 int		athn_ioctl(struct ifnet *, u_long, caddr_t);
-static void athn_parent(struct ieee80211com *);
+static void	athn_parent(struct ieee80211com *);
 int		athn_init(struct athn_softc *);
 void		athn_stop(void *arg);
 void		athn_init_tx_queues(struct athn_softc *);
@@ -207,8 +210,8 @@ void		ar9003_reset_txsring(struct athn_softc *);
 
 /* Added Definitions */
 void	athn_config_ht(struct athn_softc *sc);
-void	athn_getradiocaps(struct ieee80211com *ic,
-			int maxchans, int *nchans, struct ieee80211_channel chans[]);
+static void	athn_getradiocaps(struct ieee80211com *ic, int maxchans, int *nchans,
+			struct ieee80211_channel chans[]);
 
 #if 0
 struct cfdriver athn_cd = {
@@ -271,12 +274,20 @@ athn_config_ht(struct athn_softc *sc)
 //	}
 }
 
+static void
+athn_getradiocaps(struct ieee80211com *ic, int maxchans, int *nchans,
+	struct ieee80211_channel chans[])
+{
+	uint8_t bands[IEEE80211_MODE_BYTES];
+	memset(bands, 0, sizeof(bands));
+	setbit(bands, IEEE80211_MODE_11G);
+	ieee80211_add_channels_default_2ghz(chans, maxchans, nchans, bands, 0);
+}
+
 int
 athn_attach(struct athn_softc *sc)
 {
-	DEBUG_PRINTF("-- Comes to athn_attach! ----- \n");
 	struct ieee80211com *ic = &sc->sc_ic;
-//	struct ifnet *ifp = &ic->ic_if;
 	int error;
 
 	/* Read hardware revision. */
@@ -437,6 +448,12 @@ DEBUG_PRINTF("DEBUG: Exit athn_set_power_sleep\n");
 		IEEE80211_C_SHSLOT |		// OpenBSD's IEEE80211_C_SHSLOT
 		IEEE80211_C_SHPREAMBLE |	// OpenBSD's IEEE80211_C_SHPREAMBLE
 		IEEE80211_C_TXPMGT;			// OpenBSD's IEEE80211_C_APPMGT
+
+	ic->ic_cryptocaps =
+		IEEE80211_CRYPTO_WEP |
+		IEEE80211_CRYPTO_AES_CCM |
+		IEEE80211_CRYPTO_TKIPMIC |
+		IEEE80211_CRYPTO_TKIP;
 //
 //	    IEEE80211_C_WEP |		/* WEP. */
 //	    IEEE80211_C_RSN |		/* WPA/RSN. */
@@ -454,6 +471,7 @@ DEBUG_PRINTF("DEBUG: Enter athn_config_ht\n");
 DEBUG_PRINTF("DEBUG: Exit athn_config_ht\n");
 
 	/* Set supported rates. */
+	athn_getradiocaps(ic, IEEE80211_CHAN_MAX, &ic->ic_nchans, ic->ic_channels);
 #if 0
 	if (sc->flags & ATHN_FLAG_11G) {
 		ic->ic_sup_rates[IEEE80211_MODE_11B] =
@@ -473,6 +491,7 @@ DEBUG_PRINTF("DEBUG: Exit athn_config_ht\n");
 	/* Get the list of authorized/supported channels. */
 	athn_get_chanlist(sc);
 
+/*
 	for(int i = 0;i<ic->ic_nchans;i++) {
 		DEBUG_PRINTF("Chan: %d\tFlags: %0x02\n", i, ic->ic_channels[i].ic_flags);
 		if (ic->ic_channels[i].ic_flags == 0) {
@@ -480,6 +499,7 @@ DEBUG_PRINTF("DEBUG: Exit athn_config_ht\n");
 			ic->ic_channels[i].ic_flags = 0x0;
 		}
 	}
+*/
 
 	/* IBSS channel undefined for now. */
 	ic->ic_bsschan = &ic->ic_channels[0];
@@ -499,6 +519,9 @@ DEBUG_PRINTF("DEBUG: Exit athn_config_ht\n");
 	DEBUG_PRINTF("ieee80211_ifattach happens...\n");
 	DEBUG_PRINTF("ic_nchans: %d\n", ic->ic_nchans);
 	ieee80211_ifattach(ic);
+
+	// Added here because ic->ic_bsschan is overwritten in ieee80211_ifattach
+	ic->ic_bsschan = &ic->ic_channels[0];
 
 	/*
 	ic->ic_raw_xmit = ??
@@ -558,28 +581,28 @@ DEBUG_PRINTF("DEBUG: Exit athn_config_ht\n");
 void
 athn_detach(struct athn_softc *sc)
 {
-	printf("%s unimplemented\n", __func__);
-#if 0
-	struct ifnet *ifp = &sc->sc_ic.ic_if;
+	struct ieee80211com *ic = &sc->sc_ic;
 	int qid;
 
-	timeout_del(&sc->scan_to);
-	timeout_del(&sc->calib_to);
+	mtx_destroy(&sc->sc_mtx);
+
+	// XXX Fix the timeout_del conversion from openbsd here
+//	timeout_del(&sc->scan_to);
+//	timeout_del(&sc->calib_to);
 
 	if (!(sc->flags & ATHN_FLAG_USB)) {
 		for (qid = 0; qid < ATHN_QID_COUNT; qid++)
 			athn_tx_reclaim(sc, qid);
 
 		/* Free Tx/Rx DMA resources. */
-		sc->ops.dma_free(sc);
+//		sc->ops.dma_free(sc);
 	}
 	/* Free ROM copy. */
 	if (sc->eep != NULL)
-		free(sc->eep, M_DEVBUF, 0);
+		free(sc->eep, M_DEVBUF);
 
-	ieee80211_ifdetach(ifp);
-	if_detach(ifp);
-#endif
+	ieee80211_ifdetach(ic);
+//	if_detach(ifp);
 }
 
 //#if NBPFILTER > 0
@@ -1233,33 +1256,33 @@ athn_reset_key(struct athn_softc *sc, int entry)
 	 * the temporary register and writes the result to key cache memory.
 	 * The actual written memory area is 50 bits wide.
 	 */
-DEBUG_PRINTF("Reset key 1\n");
+//DEBUG_PRINTF("Reset key 1\n");
 	AR_WRITE(sc, AR_KEYTABLE_KEY0(entry), 0);
-DEBUG_PRINTF("AR_KEYTABLE_KEY0 = %d\n", AR_KEYTABLE_KEY0(entry));
+//DEBUG_PRINTF("AR_KEYTABLE_KEY0 = %d\n", AR_KEYTABLE_KEY0(entry));
 	AR_WRITE(sc, AR_KEYTABLE_KEY1(entry), 0);
-DEBUG_PRINTF("AR_KEYTABLE_KEY1 = %d\n", AR_KEYTABLE_KEY1(entry));
+//DEBUG_PRINTF("AR_KEYTABLE_KEY1 = %d\n", AR_KEYTABLE_KEY1(entry));
 
-DEBUG_PRINTF("Reset key 2\n");
+//DEBUG_PRINTF("Reset key 2\n");
 	AR_WRITE(sc, AR_KEYTABLE_KEY2(entry), 0);
-DEBUG_PRINTF("AR_KEYTABLE_KEY2 = %d\n", AR_KEYTABLE_KEY2(entry));
+//DEBUG_PRINTF("AR_KEYTABLE_KEY2 = %d\n", AR_KEYTABLE_KEY2(entry));
 	AR_WRITE(sc, AR_KEYTABLE_KEY3(entry), 0);
-DEBUG_PRINTF("AR_KEYTABLE_KEY3 = %d\n", AR_KEYTABLE_KEY3(entry));
+//DEBUG_PRINTF("AR_KEYTABLE_KEY3 = %d\n", AR_KEYTABLE_KEY3(entry));
 
-DEBUG_PRINTF("Reset key 3\n");
+//DEBUG_PRINTF("Reset key 3\n");
 	AR_WRITE(sc, AR_KEYTABLE_KEY4(entry), 0);
-DEBUG_PRINTF("AR_KEYTABLE_KEY4 = %d\n", AR_KEYTABLE_KEY4(entry));
+//DEBUG_PRINTF("AR_KEYTABLE_KEY4 = %d\n", AR_KEYTABLE_KEY4(entry));
 	AR_WRITE(sc, AR_KEYTABLE_TYPE(entry), AR_KEYTABLE_TYPE_CLR);
-DEBUG_PRINTF("AR_KEYTABLE_TYPE %d %d\n", AR_KEYTABLE_TYPE(entry), AR_KEYTABLE_TYPE_CLR);
+//DEBUG_PRINTF("AR_KEYTABLE_TYPE %d %d\n", AR_KEYTABLE_TYPE(entry), AR_KEYTABLE_TYPE_CLR);
 
-DEBUG_PRINTF("Reset key 4\n");
+//DEBUG_PRINTF("Reset key 4\n");
 	AR_WRITE(sc, AR_KEYTABLE_MAC0(entry), 0);
-DEBUG_PRINTF("AR_KEYTABLE_MAC0 = %d\n", AR_KEYTABLE_MAC0(entry));
+//DEBUG_PRINTF("AR_KEYTABLE_MAC0 = %d\n", AR_KEYTABLE_MAC0(entry));
 	AR_WRITE(sc, AR_KEYTABLE_MAC1(entry), 0);
-DEBUG_PRINTF("AR_KEYTABLE_MAC1 = %d\n", AR_KEYTABLE_MAC1(entry));
+//DEBUG_PRINTF("AR_KEYTABLE_MAC1 = %d\n", AR_KEYTABLE_MAC1(entry));
 
-DEBUG_PRINTF("Reset key 5\n");
+//DEBUG_PRINTF("Reset key 5\n");
 	AR_WRITE_BARRIER(sc);
-DEBUG_PRINTF("Reset key 6\n");
+//DEBUG_PRINTF("Reset key 6\n");
 }
 
 int
@@ -2946,6 +2969,7 @@ athn_next_scan(void *arg)
 #endif
 }
 
+#if 0
 int
 athn_newstate(struct ieee80211vap *vap, enum ieee80211_state nstate, int arg)
 {
@@ -3048,6 +3072,7 @@ athn_newstate(struct ieee80211vap *vap, enum ieee80211_state nstate, int arg)
 
 	return (sc->sc_newstate(ic, nstate, arg));
 }
+#endif
 
 void
 athn_updateedca(struct ieee80211com *ic)
@@ -3576,26 +3601,24 @@ athn_stop(void *arg)
 static void
 athn_parent(struct ieee80211com *ic)
 {
-	struct athn_softc *sc = ic->ic_softc;
-	DEBUG_PRINTF("%s under implemented...\n", __func__);
+//	struct athn_softc *sc = ic->ic_softc;
 //	int startall = 0;
-
 	// Some sort of detatched thingy
-//	if (sc->sc_
+
+	printf("athn_parent\n");
 
 	if (ic->ic_nrunning > 0) {
-		DEBUG_PRINTF("Top condition\n");
-		if (sc->sc_init(sc) == 0) {
-//		if (athn_usb_init(sc) == 0)
-			DEBUG_PRINTF("ieee80211_start_all\n");
-			ieee80211_start_all(ic);
+//		if (sc->sc_init(sc) == 0) {
+		if (1) {
+			printf("ieee80211_start_all\n");
+//			ieee80211_start_all(ic);
 		}
 		else {
-			DEBUG_PRINTF("ieee80211_stop_all\n");
-			ieee80211_stop_all(ic);
+			printf("ieee80211_stop_all\n");
+//			ieee80211_stop_all(ic);
 		}
 	} else {
-		athn_stop(sc);
+//		athn_stop(sc);
 	}
 }
 
@@ -3624,21 +3647,6 @@ athn_wakeup(struct athn_softc *sc)
 #endif
 }
 
-void
-athn_getradiocaps(struct ieee80211com *ic,
-	int maxchans, int *nchans, struct ieee80211_channel chans[])
-{
-//	struct athn_softc *sc = ic->ic_softc;
-	uint8_t bands[IEEE80211_MODE_BYTES];
-
-	memset(bands, 0, sizeof(bands));
-	setbit(bands, IEEE80211_MODE_11B);
-	setbit(bands, IEEE80211_MODE_11G);
-
-	ieee80211_add_channels_default_2ghz(chans, maxchans, nchans,
-		bands, 0); //(ic->ic_htcaps & IEEE80211_HTCAP, CHWIDTH40) ?
-//		NET80211_CBW_FLAG_HT40 : 0);
-}
 
 
 MODULE_VERSION(athn, 1);
